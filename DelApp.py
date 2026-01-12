@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+from pandas.errors import EmptyDataError
 
 # ---------------- Page Config ----------------
 st.set_page_config(page_title="Delivered Orders App", layout="wide")
@@ -8,8 +9,8 @@ st.title("Delivered Orders Comparison")
 
 # ---------------- File Upload ----------------
 uploaded_file = st.file_uploader(
-    "Upload Excel file",
-    type=["xlsx"]
+    "Upload Excel or CSV file",
+    type=["xlsx", "xls", "csv"]
 )
 
 # ---------------- User Inputs ----------------
@@ -31,20 +32,49 @@ with col2:
         step=1
     )
 
+# ---------------- Helper: read file safely ----------------
+def read_file(uploaded_file):
+    uploaded_file.seek(0)
+
+    # Excel
+    if uploaded_file.name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(uploaded_file)
+
+    # CSV
+    try:
+        return pd.read_csv(uploaded_file, sep="\t", encoding="utf-16")
+    except Exception:
+        uploaded_file.seek(0)
+        return pd.read_csv(
+            uploaded_file,
+            sep=None,
+            engine="python",
+            encoding_errors="ignore"
+        )
+
 # ---------------- Excel Helper ----------------
 def to_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
+    output.seek(0)
     return output.getvalue()
 
 # ---------------- Main Logic ----------------
 if uploaded_file is not None:
     try:
-        data = pd.read_excel(uploaded_file)
+        data = read_file(uploaded_file)
+
+        if data.empty:
+            st.error("❌ الملف فاضي")
+            st.stop()
 
         # -------- Data Processing --------
-        data["phone_number"] = data["phone_number"].astype(str)
+        data["phone_number"] = (
+            data["phone_number"]
+            .astype(str)
+            .str.strip()
+        )
 
         start_2 = data["phone_number"].str.startswith("2")
         data.loc[start_2, "phone_number"] = data.loc[start_2, "phone_number"].str[2:]
@@ -54,11 +84,13 @@ if uploaded_file is not None:
         data["customer_name"] = (
             data["customer_name"]
             .astype(str)
-            .apply(lambda x: x.split(" ")[0])
+            .str.split()
+            .str[0]
         )
 
         data["delivery_status_date"] = pd.to_datetime(
-            data["delivery_status_date"].astype(str).str[:10]
+            data["delivery_status_date"].astype(str).str[:10],
+            errors="coerce"
         )
 
         # -------- Date Calculation --------
@@ -72,42 +104,49 @@ if uploaded_file is not None:
             - pd.Timedelta(days=int(latest_day_number_of_days))
         )
 
-        # -------- Final DataFrames (2 columns only) --------
+        # -------- Final DataFrames --------
         delivered_latest = (
             data.loc[data["delivery_status_date"] == latest_date,
                      ["order_code", "customer_name"]]
+            .drop_duplicates()
             .reset_index(drop=True)
         )
 
         delivered_old = (
             data.loc[data["delivery_status_date"] == old_date,
                      ["order_code", "customer_name"]]
+            .drop_duplicates()
             .reset_index(drop=True)
         )
 
         # ---------------- Display ----------------
         st.subheader(f"Delivered on {latest_date.date()}")
+        st.write(f"Rows: {len(delivered_latest)}")
         st.dataframe(delivered_latest, use_container_width=True)
 
         st.subheader(f"Delivered on {old_date.date()}")
+        st.write(f"Rows: {len(delivered_old)}")
         st.dataframe(delivered_old, use_container_width=True)
 
         # ---------------- Download ----------------
         st.download_button(
-            "Download Latest Delivered (Excel)",
+            "⬇️ Download Latest Delivered (Excel)",
             data=to_excel(delivered_latest),
             file_name="delivered_latest.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
         st.download_button(
-            "Download Old Delivered (Excel)",
+            "⬇️ Download Old Delivered (Excel)",
             data=to_excel(delivered_old),
             file_name="delivered_old.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+    except EmptyDataError:
+        st.error("❌ لا يمكن قراءة الملف (فاضي أو غير صالح)")
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"❌ Error: {e}")
+
 else:
-    st.info("من فضلك ارفع ملف Excel عشان نبدأ")
+    st.info("من فضلك ارفع ملف Excel أو CSV عشان نبدأ")
